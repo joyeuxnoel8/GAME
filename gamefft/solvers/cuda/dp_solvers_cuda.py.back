@@ -1,0 +1,126 @@
+from gamefft.solvers.dp_solvers import AbstractDPKernelCompressed
+from gamefft.solvers.dp_solvers import Encoder1
+from gamefft.solvers.dp_solvers import GenericDPSolverOptCompressed
+from jinja2 import Template
+from numpy import *
+from pycuda.compiler import SourceModule
+import pycuda.autoinit
+import pycuda.driver as drv
+import pycuda.gpuarray as gpuarray
+import pycuda.tools
+import os
+
+# Kernels ========================================
+
+class DPKernelGpuCudaOptCompressed(AbstractDPKernelCompressed):
+    
+    class ScarceRessourceException(Exception):
+        def __init__(self,res):
+            msg ="===================================\n"
+            msg+="Error: CUDA context error\n"
+            for item in res:
+                msg+=item+"\n"
+            Exception.__init__(self,msg)
+    
+    def check_context(self,device,shmemsize,globalmemsize,constmemsize,num_blocks,num_threads):
+        res=[]
+        ok=True
+        ok= shmemsize  <=device.MAX_SHARED_MEMORY_PER_BLOCK and ok
+        ok= num_threads<=device.MAX_THREADS_PER_BLOCK and ok
+        ok= num_blocks <=device.MAX_GRID_DIM_X and ok
+        ok= globalmemsize <= device.total_memory() and ok
+        ok= constmemsize <= device.TOTAL_CONSTANT_MEMORY and ok
+        res.append("shmemsize:  used %d bytes  [max: %d bytes]" % (shmemsize,device.MAX_SHARED_MEMORY_PER_BLOCK))
+        res.append("numthreads: used %d  [max: %d]" % (num_threads,device.MAX_THREADS_PER_BLOCK))
+        res.append("numblocks: used %d  [max: %d]" % (num_blocks,device.MAX_GRID_DIM_X))
+        res.append("globalmem: used %d MB  [max: %d MB]" % (globalmemsize //1024//1024,device.total_memory()//1024//1024))
+        res.append("const mem: used %d bytes  [max: %d bytes]" % (constmemsize,device.TOTAL_CONSTANT_MEMORY))
+        return (ok,res)
+    
+    def run(self, n, R, wt_max, K, W, P, L, C, K_encoder, R_encoder, run_options):
+                
+        """
+        filename = os.path.dirname(os.path.abspath(__file__)) + "/dp_kernel.cu.cc"
+        f = open(filename, "r")
+        tpl = Template(f.read())
+        f.close() 
+        
+        argtypes=[  intp,intp,intp,
+                    intp,intp,intp,
+                    intp,intp,int32,
+                    int32,int32,int32]
+        """  
+        
+        Cprev = zeros_like(C)
+        Cswi = [C, Cprev]        
+        K_offsets = array(K_encoder.offsets, dtype=int32)
+        R_offsets = array(R_encoder.offsets, dtype=int32)
+        l = int(max([len(x) for x in W]))
+        
+        # ================================================================   
+        s=0
+        drv.init()
+        dev = drv.Device(0)
+        # define context
+        num_threads=None
+        shmemsize=None
+        t=int(log2(dev.MAX_SHARED_MEMORY_PER_BLOCK/(4*3*K[s]*R)))
+        num_threads=2**t
+        shmemsize=4*3*K[s]*R*num_threads
+        block_dim=int(sqrt(wt_max/num_threads))+1
+        #compute global memory usage
+        global_mem = 2*C.astype(float32).nbytes
+        constant_mem = P.astype(float32).nbytes+W.astype(int32).nbytes+K.astype(int32).nbytes+K_offsets.astype(int32).nbytes+R_offsets.astype(int32).nbytes
+        #checking
+        ok,res=self.check_context(dev, shmemsize, global_mem+constant_mem, constant_mem, block_dim, num_threads)
+        for item in res:
+            print item
+        if not ok:
+            raise self.ScarceRessourceException(res)
+        
+        # ================================================================    
+        """
+        C_gpu=gpuarray.to_gpu(C.astype(float32))
+        Cprev_gpu=gpuarray.to_gpu(Cprev.astype(float32))
+        L_gpu=gpuarray.to_gpu(L.astype(int32))
+        P_gpu=gpuarray.to_gpu(P.astype(float32))
+        W_gpu=gpuarray.to_gpu(W.astype(int32))
+        K_gpu=gpuarray.to_gpu(K.astype(int32))
+        K_offsets_gpu=gpuarray.to_gpu(K_offsets.astype(int32))
+        R_offsets_gpu=gpuarray.to_gpu(R_offsets.astype(int32))
+        """
+        
+        
+        tpl = Template("""   
+        extern __shared__ int smem[];
+        
+        __global__ void square_them(int* a,int l)
+        {
+            
+            const int i = blockDim.x*blockIdx.x +l*threadIdx.x;
+            int* tmp=&smem[l*threadIdx.x];
+            for(int j=0;j<l;++j)
+                tmp[j]=a[i+j];
+            __syncthreads();
+            for(int j=0;j<l;++j)
+                tmp[j]*=2;
+            __syncthreads();
+            for(int j=0;j<l;++j)
+                a[i+j]=tmp[j];
+            
+        }
+        """)      
+        
+        
+
+
+        TIMEOUT = 0  
+        SIGINT = 0
+        return (SIGINT, TIMEOUT)   
+
+
+# Specialized solvers ===============================
+
+class DPSolverGpuCudaOptCompressed(GenericDPSolverOptCompressed):
+    def __init__(self):
+        GenericDPSolverOptCompressed.__init__(self, DPKernelGpuCudaOptCompressed())
