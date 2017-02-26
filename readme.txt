@@ -8,6 +8,8 @@ This program enables to identify the main structures with the given targeted mol
 The core optimization problem solved within this procedure (referred as CSCCP) is solved in this distribution by implementing a Dynamic programming algorithm (DP):
 A GPU accelerated version of the DP, named GAME, developed by Alioune Schurz is implemented in this library. 
 
+NOTICE: official repository moved to https://github.com/CMDM-Lab/GAME.
+
 
 Dependencies 
 ============
